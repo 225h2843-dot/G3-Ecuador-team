@@ -46,7 +46,7 @@ Con todas las trayectorias en el mismo instante de tiempo y espacio, el código 
 2. **Error de orientación ('yaw_error_odom'):** Resta directa entre el ángulo calculado por las ruedas y el ángulo del algoritmo AMCL.
 3. **Filtrado de Nulos (`~isnan`):** Se remueven los valores indeterminados (`NaN`) producidos en los extremos por la interpolación para evitar errores en los promedios globales
 
-### * Paso 5: Cálculo de RMSE y Gráfica de resultados
+### * PASO 5: Cálculo de RMSE y Gráfica de resultados
 Finalmente, se presentan los resultados y se grafican
 1 **Métricas (RMSE):** Calcula e imprime el **Error Cuadrático Medio (RMSE)** de la posición y la orientación de la odometría para medir numéricamente la gravedad de la deriva (*drift*).
 2 **Gráficas de Trayectorias:** Genera mapas en 2D utilizando 'figure' comparando rutas y su presición correspondeinte con la real.
