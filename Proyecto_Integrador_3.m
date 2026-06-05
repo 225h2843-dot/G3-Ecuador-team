@@ -1,535 +1,512 @@
-function out = mcl(bagFile)
+clc; clear; close all;
 
-    if nargin < 1 || isempty(bagFile)
-        [f,p] = uigetfile('*.bag','Selecciona un rosbag');
-        if isequal(f,0)
-            error('No se selecciono rosbag.');
-        end
-        bagFile = fullfile(p,f);
-    end
+%%%%%%%%%%% 
+% ----------------------------------
+% CARGA DE DATOS DEL ROSBAG | Robot MiR100 %
+% ----------------------------------
+%%%%%%%%%%%
 
-    bag = rosbag(bagFile);
-    topics = bag.AvailableTopics.Properties.RowNames;
-    hasTopic = @(name) any(strcmp(name, topics));
+    %----------------------------
+    % - Cargar  el archivo rosbag 
+    %----------------------------
+[f, p] = uigetfile('*.bag', 'Selecciona un rosbag');
+if isequal(f, 0)
+    disp('No se ha seleccionado archivo.');
+    return;
+end
 
-    
-    timeFromHeader = @(h) double(h.Stamp.Sec) + double(h.Stamp.Nsec)*1e-9;
-    quatToYaw = @(q) atan2(2*(q.W*q.Z + q.X*q.Y), 1 - 2*(q.Y^2 + q.Z^2));
-    wrapPi = @(a) atan2(sin(a), cos(a));
+bagFile = fullfile(p, f);
+fprintf('Cargando rosbag: %s\n', bagFile);
+bag = rosbag(bagFile);
 
-    if ~hasTopic('/map')
-        error('Falta /map');
-    end
-    bagMap = select(bag,'Topic','/map');
-    mapMsg = readMessages(bagMap,1,'DataFormat','struct');
-    mapMsg = mapMsg{1};
+fprintf('\nTopics disponibles:\n');
+disp(bag.AvailableTopics.Properties.RowNames);
 
-    res = double(mapMsg.Info.Resolution);
-    W = double(mapMsg.Info.Width);
-    H = double(mapMsg.Info.Height);
+hasTopic = @(name) any(strcmp(name, bag.AvailableTopics.Properties.RowNames));
+timeFromHeader = @(h) double(h.Stamp.Sec) + double(h.Stamp.Nsec)*1e-9;
+quatToYaw = @(q) atan2(2*(q.W*q.Z + q.X*q.Y), 1 - 2*(q.Y^2 + q.Z^2));
 
-    origin_x = double(mapMsg.Info.Origin.Position.X);
-    origin_y = double(mapMsg.Info.Origin.Position.Y);
-    origin_yaw = quatToYaw(mapMsg.Info.Origin.Orientation);
+%----------------------------
+% 1) ODOMETRÍA ( /odom )
+%----------------------------
 
-    dataRaw = int16(mapMsg.Data(:));
-    occgrid = reshape(dataRaw, [W, H])';
-    occThresh = 50;
-    occ = (occgrid >= occThresh);
+odom = [];
+if hasTopic('/odom')
+    bagOdom = select(bag, 'Topic', '/odom');
+    odomMsgs = readMessages(bagOdom, 'DataFormat', 'struct');
 
-    distCells = bwdist(occ);
-    dist = double(distCells) * res;
+    n = numel(odomMsgs);
+    odom.t = zeros(n,1);
+    odom.x = zeros(n,1);
+    odom.y = zeros(n,1);
+    odom.yaw = zeros(n,1);
 
-    laser_offset = [0;0];
-    laser_yaw = -3*pi/4;
-
-    if hasTopic('/tf_static')
-        bagTFS = select(bag,'Topic','/tf_static');
-        tfsMsgs = readMessages(bagTFS,1,'DataFormat','struct');
-        tfs = tfsMsgs{1}.Transforms;
-        found = false;
-        for i = 1:numel(tfs)
-            ch = string(tfs(i).ChildFrameId);
-            pr = string(tfs(i).Header.FrameId);
-            if ch == "back_laser_link" && (pr == "base_link" || pr == "base_footprint")
-                tr = tfs(i).Transform.Translation;
-                rq = tfs(i).Transform.Rotation;
-                laser_offset = [double(tr.X); double(tr.Y)];
-                laser_yaw = quatToYaw(struct('W',rq.W,'X',rq.X,'Y',rq.Y,'Z',rq.Z));
-                found = true;
-                break;
-            end
-        end
-        if ~found
-            for i = 1:numel(tfs)
-                ch = string(tfs(i).ChildFrameId);
-                pr = string(tfs(i).Header.FrameId);
-                if ch == "back_laser_link" && pr == "base_link"
-                    tr = tfs(i).Transform.Translation;
-                    rq = tfs(i).Transform.Rotation;
-                    laser_offset = [double(tr.X); double(tr.Y)];
-                    laser_yaw = quatToYaw(struct('W',rq.W,'X',rq.X,'Y',rq.Y,'Z',rq.Z));
-                    break;
-                end
-            end
-        end
-    end
-
-    odomTopic = '/odometry/filtered';
-    if ~hasTopic(odomTopic)
-        error('Falta %s', odomTopic);
-    end
-
-    bagOdom = select(bag,'Topic',odomTopic);
-    odomMsgs = readMessages(bagOdom,'DataFormat','struct');
-
-    nO = numel(odomMsgs);
-    odom.t   = zeros(nO,1);
-    odom.x   = zeros(nO,1);
-    odom.y   = zeros(nO,1);
-    odom.yaw = zeros(nO,1);
-
-    for k = 1:nO
+    for k = 1:n
         m = odomMsgs{k};
         odom.t(k) = timeFromHeader(m.Header);
         odom.x(k) = m.Pose.Pose.Position.X;
         odom.y(k) = m.Pose.Pose.Position.Y;
-        q = m.Pose.Pose.Orientation;
-        odom.yaw(k) = quatToYaw(q);
+        odom.yaw(k) = quatToYaw(m.Pose.Pose.Orientation);
     end
 
-    [odom.t, idxO] = sort(odom.t);
-    odom.x   = odom.x(idxO);
-    odom.y   = odom.y(idxO);
-    odom.yaw = odom.yaw(idxO);
+    fprintf('Leídos %d mensajes de /odom\n', n);
+else
+    error('No se encontró /odom en el bag.');
+end
 
-    odom.t0 = odom.t(1);
-    odom.tr = odom.t - odom.t0;
+%----------------------------
+% 2) LÁSER ( /scan )
+%----------------------------
 
-    inc.dt   = zeros(nO,1);
-    inc.dx   = zeros(nO,1);
-    inc.dy   = zeros(nO,1);
-    inc.dyaw = zeros(nO,1);
+scan = [];
+if hasTopic('/scan')
+    bagScan = select(bag, 'Topic', '/scan');
+    scanMsgs = readMessages(bagScan, 'DataFormat', 'struct');
 
-    inc.dt(1) = NaN;
-    for k = 2:nO
-        inc.dt(k) = odom.tr(k) - odom.tr(k-1);
-        inc.dx(k) = odom.x(k) - odom.x(k-1);
-        inc.dy(k) = odom.y(k) - odom.y(k-1);
-        inc.dyaw(k) = wrapPi(odom.yaw(k) - odom.yaw(k-1));
-    end
-    odom.inc = inc;
+    n = numel(scanMsgs);
+    scan.t = zeros(n,1);
+    scan.ranges = cell(n,1);
+    scan.angles = cell(n,1);
 
-    scanTopic = '/scan';
-    if ~hasTopic(scanTopic)
-        error('Falta %s', scanTopic);
-    end
+    rangeMin = double(scanMsgs{1}.RangeMin);
+    rangeMax = double(scanMsgs{1}.RangeMax);
+    maxRange = rangeMax;
 
-    bagScan = select(bag,'Topic',scanTopic);
-    scanMsgs = readMessages(bagScan,'DataFormat','struct');
+    for k = 1:n
+        m = scanMsgs{k};
+        ranges_k = double(m.Ranges(:));
+        N = numel(ranges_k);
 
-    nS = numel(scanMsgs);
-    scan.t  = zeros(nS,1);
-    scan.ranges = cell(nS,1);
-
-    s0 = scanMsgs{1};
-    scan.frame_id  = s0.Header.FrameId;
-    scan.angle_min = double(s0.AngleMin);
-    scan.angle_inc = double(s0.AngleIncrement);
-    scan.range_min = double(s0.RangeMin);
-    scan.range_max = double(s0.RangeMax);
-    scan.N = numel(s0.Ranges);
-    scan.angles = scan.angle_min + (0:scan.N-1)' * scan.angle_inc;
-
-    for i = 1:nS
-        s = scanMsgs{i};
-        scan.t(i) = timeFromHeader(s.Header);
-        scan.ranges{i} = double(s.Ranges(:));
+        scan.t(k) = timeFromHeader(m.Header);
+        scan.ranges{k} = ranges_k;
+        scan.angles{k} = double(m.AngleMin) + (0:N-1)' * double(m.AngleIncrement);
     end
 
-    [scan.t, idxS] = sort(scan.t);
-    scan.ranges = scan.ranges(idxS);
-    scan.tr = scan.t - odom.t0;
+    fprintf('Leídos %d mensajes de /scan\n', n);
+else
+    error('No se encontró /scan en el bag.');
+end
 
-    maxScanAge = 0.08;
-    assoc.scan_idx = zeros(nO,1);
-    assoc.scan_dt  = NaN(nO,1);
-    assoc.maxScanAge = maxScanAge;
+%----------------------------
+% 3) IMU ( /imu_data )
+%----------------------------
 
-    j = 1;
-    for k = 1:nO
-        tk = odom.tr(k);
-        while j < nS && scan.tr(j) < tk
-            j = j + 1;
-        end
+imu = [];
+if hasTopic('/imu_data')
+    bagIMU = select(bag, 'Topic', '/imu_data');
+    imuMsgs = readMessages(bagIMU, 'DataFormat', 'struct');
 
-        cand = [];
-        if j >= 1 && j <= nS, cand(end+1) = j; end
-        if (j-1) >= 1 && (j-1) <= nS, cand(end+1) = j-1; end
+    n = numel(imuMsgs);
+    imu.t = zeros(n,1);
+    imu.yaw = zeros(n,1);
 
-        if isempty(cand)
-            assoc.scan_idx(k) = 0;
-            assoc.scan_dt(k)  = NaN;
-            continue;
-        end
-
-        [dtmin, ii] = min(abs(scan.tr(cand) - tk));
-        best = cand(ii);
-
-        if dtmin <= maxScanAge
-            assoc.scan_idx(k) = best;
-            assoc.scan_dt(k)  = dtmin;
-        else
-            assoc.scan_idx(k) = 0;
-            assoc.scan_dt(k)  = dtmin;
-        end
+    for k = 1:n
+        m = imuMsgs{k};
+        imu.t(k) = timeFromHeader(m.Header);
+        imu.yaw(k) = quatToYaw(m.Orientation);
     end
 
-    Np = 600;
-    sigma_init_xy  = 0.30;
-    sigma_init_yaw = deg2rad(20);
-
-    alpha_xy   = 0.02;
-    alpha_yaw  = deg2rad(0.5);
-    alpha_xy_r = 0.01;
-    alpha_yaw_t = deg2rad(1.0);
+    fprintf('Leídos %d mensajes de /imu_data\n', n);
+else
+    warning('No se encontró /imu_data. Se usará yaw de /odom.');
+end
 
 
-    sigma_z = 0.15;
-    maxDistFallback = 1.0;
-    beamStep = 8;
-    beamIdxAll = 1:beamStep:scan.N;
+%%%%%%%%%%% 
+% ----------------------------------------------
+% SINCRONIZACIONES Y TRANSFORMACIONES DE DATOS 
+% ----------------------------------------------
+%%%%%%%%%%%
 
-    NeffThreshFrac = 0.5;
+%--------------------------------------------
+% Transformación LiDAR a frame de base_link 
+%--------------------------------------------
 
-    particles = zeros(Np,3);
-    weights   = ones(Np,1) / Np;
+laser_tf = [];
+if hasTopic('/tf_static')
+    bagTFs = select(bag, 'Topic', '/tf_static');
+    tfMsgs = readMessages(bagTFs, 'DataFormat', 'struct');
 
-    x0 = odom.x(1);
-    y0 = odom.y(1);
-    yaw0 = odom.yaw(1);
-    particles(:,1) = x0 + sigma_init_xy  * randn(Np,1);
-    particles(:,2) = y0 + sigma_init_xy  * randn(Np,1);
-    particles(:,3) = wrapPi(yaw0 + sigma_init_yaw * randn(Np,1));
-    est = zeros(nO,3);
-    Neff = zeros(nO,1);
-    didResample = false(nO,1);
-
-    est(1,:) = [sum(particles(:,1).*weights), sum(particles(:,2).*weights), circMeanAngle(particles(:,3), weights)];
-    Neff(1) = 1/sum(weights.^2);
-
-    for k = 2:nO
-
-        dx = odom.inc.dx(k);
-        dy = odom.inc.dy(k);
-        dyaw = odom.inc.dyaw(k);
-
-        trans = hypot(dx, dy);
-        rot = abs(dyaw);
-
-        sig_xy = alpha_xy + alpha_xy_r * trans;
-        sig_yaw = alpha_yaw + alpha_yaw_t * rot;
-
-        ndx = dx + sig_xy * randn(Np,1);
-        ndy = dy + sig_xy * randn(Np,1);
-        ndyaw = dyaw + sig_yaw * randn(Np,1);
-        particles(:,1) = particles(:,1) + ndx;
-        particles(:,2) = particles(:,2) + ndy;
-        %{
-        particles(:,1) = particles(:,1) + ndx .* cos(particles(:,3)) - ndy .* sin(particles(:,3));
-        particles(:,2) = particles(:,2) + ndx .* sin(particles(:,3)) + ndy
-        .* cos(particles(:,3));
-        %}
-        particles(:,3) = wrapPi(particles(:,3) + ndyaw);
-
-        idxScan = assoc.scan_idx(k);
-
-        if idxScan > 0
-            ranges = scan.ranges{idxScan};
-            angles = scan.angles;
-
-            bi = beamIdxAll;
-            r = ranges(bi);
-            a = angles(bi);
-
-            valid = isfinite(r) & (r > (scan.range_min + 1e-3)) & (r < (scan.range_max - 1e-3));
-            r = r(valid);
-            a = a(valid);
-
-            if ~isempty(r)
-                logw = zeros(Np,1);
-
-                ca = cos(a);
-                sa = sin(a);
-
-                lx = laser_offset(1);
-                ly = laser_offset(2);
-
-                for p = 1:Np
-                    xp = particles(p,1);
-                    yp = particles(p,2);
-                    th = particles(p,3);
-
-                    cth = cos(th);
-                    sth = sin(th);
-
-                    lpx = xp + cth*lx - sth*ly;
-                    lpy = yp + sth*lx + cth*ly;
-                    lth = th + laser_yaw;
-
-                    cl = cos(lth);
-                    sl = sin(lth);
-
-                    ex = lpx + r .* (cl .* ca - sl .* sa);
-                    ey = lpy + r .* (sl .* ca + cl .* sa);
-
-                    mx = (ex - origin_x) / res;
-                    my = (ey - origin_y) / res;
-
-                    ix = floor(mx) + 1;
-                    iy = floor(my) + 1;
-
-                    in = (ix >= 1) & (ix <= W) & (iy >= 1) & (iy <= H);
-
-                    d = maxDistFallback * ones(size(ix));
-                    if any(in)
-                        lin = sub2ind([H, W], iy(in), ix(in));
-                        d(in) = dist(lin);
-                    end
-
-                    logw(p) = -0.5 * sum((d.^2) / (sigma_z^2));
-                end
-
-                mlog = max(logw);
-                wnew = exp(logw - mlog);
-                sW = sum(wnew);
-                if sW <= 0 || ~isfinite(sW)
-                    wnew = ones(Np,1)/Np;
-                else
-                    wnew = wnew / sW;
-                end
-                weights = wnew;
-
-                Neff(k) = 1/sum(weights.^2);
-               
-                if Neff(k) < (NeffThreshFrac * Np)
-                    idxR = systematicResample(weights);
-                    particles = particles(idxR,:);
-                    weights = ones(Np,1)/Np;
-                    didResample(k) = true;
-                    Neff(k) = Np;
-                end
-            else
-                Neff(k) = 1/sum(weights.^2);
+    for k = 1:numel(tfMsgs)
+        tfs = tfMsgs{k}.Transforms;
+        for i = 1:numel(tfs)
+            tf = tfs(i);
+            if strcmp(tf.Header.FrameId, 'base_link') && contains(tf.ChildFrameId, 'laser')
+                laser_tf = tf;
+                break;
             end
-        else
-            Neff(k) = 1/sum(weights.^2);
         end
-
-        est(k,:) = [sum(particles(:,1).*weights), sum(particles(:,2).*weights), circMeanAngle(particles(:,3), weights)];
-    end
-
-    out = struct();
-    out.bagFile = bagFile;
-    out.map = struct('res',res,'W',W,'H',H,'origin_x',origin_x,'origin_y',origin_y,'origin_yaw',origin_yaw,'occ',occ);
-    out.dist = dist;
-    out.laser = struct('offset',laser_offset,'yaw',laser_yaw,'frame_id',scan.frame_id);
-    out.odom = odom;
-    out.scan = scan;
-    out.assoc = assoc;
-    out.est = est;
-    out.Neff = Neff;
-    out.didResample = didResample;
-    out.particles_end = particles;
-    out.weights_end = weights;
-
-    if hasTopic('/base_pose_ground_truth')
-        bagGT = select(bag,'Topic','/base_pose_ground_truth');
-        gtMsgs = readMessages(bagGT,'DataFormat','struct');
-        nG = numel(gtMsgs);
-
-        gt.t   = zeros(nG,1);
-        gt.x   = zeros(nG,1);
-        gt.y   = zeros(nG,1);
-        gt.yaw = zeros(nG,1);
-
-        for k = 1:nG
-            m = gtMsgs{k};
-            gt.t(k) = timeFromHeader(m.Header);
-            gt.x(k) = m.Pose.Pose.Position.X;
-            gt.y(k) = m.Pose.Pose.Position.Y;
-            q = m.Pose.Pose.Orientation;
-            gt.yaw(k) = quatToYaw(q);
-        end
-
-        [gt.t, idxG] = sort(gt.t);
-        gt.x = gt.x(idxG); gt.y = gt.y(idxG); gt.yaw = gt.yaw(idxG);
-        gt.tr = gt.t - odom.t0;
-        out.gt = gt;
-
-        gx = interp1(gt.tr, gt.x, odom.tr, 'linear', 'extrap');
-        gy = interp1(gt.tr, gt.y, odom.tr, 'linear', 'extrap');
-        gyaw = interp1(gt.tr, unwrap(gt.yaw), odom.tr, 'linear', 'extrap');
-        gyaw = wrapPi(gyaw);
-
-        ex = est(:,1) - gx;
-        ey = est(:,2) - gy;
-        epos = hypot(ex, ey);
-        eyaw = wrapPi(est(:,3) - gyaw);
-
-        out.err = struct('epos',epos,'eyaw',eyaw,'gx',gx,'gy',gy,'gyaw',gyaw);
-    end
-
-    figure('Name','Paso 4: Trayectorias','NumberTitle','off');
-    hold on; grid on; axis equal;
-    plot(odom.x, odom.y, 'b--', 'DisplayName','Odom filtered');
-    plot(est(:,1), est(:,2), 'r-', 'DisplayName','MCL (predict+update)');
-    if isfield(out,'gt')
-        plot(out.gt.x, out.gt.y, 'k-', 'DisplayName','Ground truth');
-    end
-    legend('Location','best');
-    xlabel('x [m]'); ylabel('y [m]');
-    title('MCL con update (scan+map)');
-    hold off;
-
-    figure('Name','Paso 4: N_eff y resampling','NumberTitle','off');
-    hold on; grid on;
-    plot(odom.tr, Neff, 'DisplayName','N_{eff}');
-    yline(NeffThreshFrac*Np, '--', 'DisplayName','Umbral');
-    stem(odom.tr(didResample), Neff(didResample), '.', 'DisplayName','Resample');
-    legend('Location','best');
-    xlabel('t [s]'); ylabel('N_{eff}');
-    title('Degeneracion y resampling');
-    hold off;
-
-    if isfield(out,'err')
-        figure('Name','Paso 4: Error vs tiempo','NumberTitle','off');
-        tiledlayout(2,1);
-        nexttile;
-        plot(odom.tr, out.err.epos);
-        grid on;
-        xlabel('t [s]'); ylabel('error pos [m]');
-        title('Error de posicion vs GT');
-        nexttile;
-        plot(odom.tr, out.err.eyaw);
-        grid on;
-        xlabel('t [s]'); ylabel('error yaw [rad]');
-        title('Error de yaw vs GT');
-    end
-
-    fprintf('Paso 4 listo: update con laser+map, Neff y resampling.\n');
-
-    kTest = find(assoc.scan_idx > 0, 1, 'first') + 200;
-    showScanOnMap(kTest, 0);
-    showScanOnMap(kTest, 1);
-
-    function ang = circMeanAngle(a,w)
-        s = sum(sin(a).*w);
-        c = sum(cos(a).*w);
-        ang = atan2(s,c);
-    end
-
-    function showScanOnMap(kOdom, pIdx)
-        idxScan = assoc.scan_idx(kOdom);
-        if idxScan <= 0
-            error('No hay scan asociado en k=%d', kOdom);
-        end
-
-        ranges = scan.ranges{idxScan};
-        angles = scan.angles;
-
-        beamStepVis = 1;
-        bi = 1:beamStepVis:numel(ranges);
-
-        r = ranges(bi);
-        a = angles(bi);
-        valid = isfinite(r) & (r > scan.range_min) & (r < scan.range_max);
-        r = r(valid);
-        a = a(valid);
-
-        if isempty(r)
-            error('Scan sin rayos validos en k=%d', kOdom);
-        end
-
-        if pIdx == 0
-
-            xp = interp1(out.gt.tr, out.gt.x, odom.tr(kOdom), 'linear', 'extrap');
-            yp = interp1(out.gt.tr, out.gt.y, odom.tr(kOdom), 'linear', 'extrap');
-            th = interp1(out.gt.tr, unwrap(out.gt.yaw), odom.tr(kOdom), 'linear', 'extrap');
-            th = wrapPi(th);
-            tag = ''
-            xp = est(kOdom,1);
-            yp = est(kOdom,2);
-            th = est(kOdom,3);
-            tag = 'EST';
-
-        else
-            xp = particles(pIdx,1);
-            yp = particles(pIdx,2);
-            th = particles(pIdx,3);
-
-            tag = sprintf('P%04d', pIdx);
-        end
-
-        lx = laser_offset(1);
-        ly = laser_offset(2);
-
-        cth = cos(th);
-        sth = sin(th);
-
-        lpx = xp + cth*lx - sth*ly;
-        lpy = yp + sth*lx + cth*ly;
-        lth = th + laser_yaw;
-
-        ca = cos(a);
-        sa = sin(a);
-
-        cl = cos(lth);
-        sl = sin(lth);
-
-        ex = lpx + r .* (cl .* ca - sl .* sa);
-        ey = lpy + r .* (sl .* ca + cl .* sa);
-
-        figure('Name',sprintf('Scan sobre mapa | k=%d',kOdom),'NumberTitle','off');
-
-        imagesc([origin_x, origin_x + W*res], [origin_y, origin_y + H*res], occ);
-        set(gca,'YDir','normal')
-        colormap(gray);
-        axis equal; axis tight; hold on;
-
-        plot(xp, yp, 'ro', 'MarkerSize', 8, 'LineWidth', 2);
-        quiver(xp, yp, cos(th), sin(th), 0.6, 'r', 'LineWidth', 2);
-
-        plot(lpx, lpy, 'mo', 'MarkerSize', 6, 'LineWidth', 2);
-
-        scatter(ex, ey, 10, 'g', 'filled');
-
-        M = min(30, numel(ex));
-        sel = round(linspace(1, numel(ex), M));
-        for ii = sel
-            plot([lpx ex(ii)], [lpy ey(ii)], 'g-');
-        end
-
-        title(sprintf('Scan proyectado en mapa (verde) | robot=%s', tag));
-        xlabel('x [m]'); ylabel('y [m]');
-        hold off;
-    end
-
-
-    function idx = systematicResample(w)
-        N = numel(w);
-        edges = cumsum(w);
-        edges(end) = 1.0;
-        u0 = rand()/N;
-        u = u0 + (0:N-1)'/N;
-        idx = zeros(N,1);
-        i = 1;
-        for j = 1:N
-            while u(j) > edges(i)
-                i = i + 1;
-            end
-            idx(j) = i;
+        if ~isempty(laser_tf)
+            break;
         end
     end
+end
 
+
+%-------------------------------------------------
+% Extracción desplazamiento y rotación del láser 
+%-------------------------------------------------
+
+if isempty(laser_tf)
+    error('No se encontró transformación base_link -> laser en /tf_static.');
+end
+
+lx = double(laser_tf.Transform.Translation.X);
+ly = double(laser_tf.Transform.Translation.Y);
+qLaser = laser_tf.Transform.Rotation;
+laserYaw = atan2(2*(qLaser.W*qLaser.Z + qLaser.X*qLaser.Y), 1 - 2*(qLaser.Y^2 + qLaser.Z^2));
+%-------------------------------
+% Sincronización de IMU con Odom
+%-------------------------------
+
+% Para la orientación del robot, vamos a utilizar la orientación del IMU
+% * Más precisa
+% * Menos error angular
+% * Menos deriva
+if ~isempty(imu)
+    odom.yaw = interp1(double(imu.t), double(imu.yaw), double(odom.t), 'nearest', 'extrap');
+    fprintf('Sustituido yaw de odometría por IMU.\n');
+end
+%----------------------------
+% Sincronización LiDAR /scan con odom /odom
+%----------------------------
+scan.odom_idx = zeros(length(scan.t),1);
+for k = 1:length(scan.t)
+    [~, idx] = min(abs(odom.t - scan.t(k)));
+    scan.odom_idx(k) = idx;
+end
+%%
+
+%%%%%%%%%%% 
+% ----------------------------------------------
+% CREACIÓN MAPA DE OCUPACIÓN 
+% ----------------------------------------------
+%%%%%%%%%%%
+
+
+%%%%%%%%%%%
+% Determinar límites del mapa a partir de la odometría
+%%%%%%%%%%%
+
+% colocamos margenes de seguridad para evitar errores de hallar la pose
+% fuera del mapa 
+
+margin = 2.0;
+xmin = min(odom.x) - margin;
+xmax = max(odom.x) + margin;
+ymin = min(odom.y) - margin;
+ymax = max(odom.y) + margin;
+
+mapWidth = xmax - xmin;
+mapHeight = ymax - ymin;
+
+%%%%%%%%%%%
+% Creación del mapa de ocupación, definición de su resolución y
+% alineación del frame
+%%%%%%%%%%%
+
+mapResolution = 10;
+
+fprintf('Límites del mapa generado:\n');
+fprintf('X: [%.2f, %.2f]\n', xmin, xmax);
+fprintf('Y: [%.2f, %.2f]\n', ymin, ymax);
+
+map = occupancyMap(mapWidth, mapHeight, mapResolution);
+map.GridLocationInWorld = [xmin, ymin];
+
+for k = 1:length(scan.t)
+    idx = scan.odom_idx(k);
+    theta = odom.yaw(idx);
+
+    x_laser = odom.x(idx) + cos(theta)*lx - sin(theta)*ly;
+    y_laser = odom.y(idx) + sin(theta)*lx + cos(theta)*ly;
+    laserPose = [x_laser, y_laser, theta + laserYaw];
+
+    ranges = double(scan.ranges{k}(:));
+    angles = double(scan.angles{k}(:));
+
+    ranges(ranges > maxRange) = maxRange;
+    ranges(ranges < rangeMin) = NaN;
+
+    N = min(numel(ranges), numel(angles));
+    insertRay(map, laserPose, ranges(1:N), angles(1:N), maxRange);
+end
+
+map_real = [];
+
+%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%%%%%%%%%%% 
+% ----------------------------------------------
+% ANÁLISIS DE RESULTADOS | GRÁFICAS REALIZADAS
+% ----------------------------------------------
+%%%%%%%%%%%
+
+%%%%%%%%%%%
+% Extracción, reconstrucción y gráfica del mapa real | Mapa del rosbag
+%%%%%%%%%%%
+
+
+if hasTopic('/map')
+    bagMap = select(bag, 'Topic', '/map');
+    mapMsgs = readMessages(bagMap, 'DataFormat', 'struct');
+
+    m = mapMsgs{1};
+    mapW = double(m.Info.Width);
+    mapH = double(m.Info.Height);
+    res = double(m.Info.Resolution);
+
+    mapData = reshape(m.Data, mapW, mapH);
+    mapData = flipud(mapData');
+
+    mapDataNorm = double(mapData);
+    mapDataNorm(mapData == -1) = NaN;
+    mapDataNorm(mapData == 0) = 0;
+    mapDataNorm(mapData == 100) = 1;
+
+    map_real = occupancyMap(mapDataNorm, 1/res);
+    map_real.GridLocationInWorld = [double(m.Info.Origin.Position.X), double(m.Info.Origin.Position.Y)];
+end
+
+figure('Name','Mapa generado por scan','NumberTitle','off');
+show(map);
+axis equal;
+title('Mapa generado a partir de odometría + LiDAR');
+xlabel('x [m]');
+ylabel('y [m]');
+
+if ~isempty(map_real)
+    occ_gen = occupancyMatrix(map);
+    occ_real = occupancyMatrix(map_real);
+    occ_real_resized = imresize(occ_real, size(occ_gen), 'nearest');
+
+    mask = isnan(occ_gen) | isnan(occ_real_resized);
+    A = occ_gen;
+    B = occ_real_resized;
+    A(mask) = [];
+    B(mask) = [];
+
+    rmse_mapa = sqrt(mean((A(:) - B(:)).^2));
+    A_bin = A > 0.65;
+    B_bin = B > 0.65;
+    coincidencia_celdas = sum(A_bin(:) == B_bin(:)) / numel(A_bin);
+
+    disp(['Error entre mapas: ', num2str(rmse_mapa)]);
+    disp(['Coincidencia de ocupación: ', num2str(coincidencia_celdas)]);
+end
+
+occ_gen = occupancyMatrix(map);
+celdas_desconocidas = sum(occ_gen(:) > 0.45 & occ_gen(:) < 0.55) / numel(occ_gen);
+disp(['Celdas desconocidas: ', num2str(celdas_desconocidas)]);
+
+startWorld = [1.0, 2.0];
+goalWorld = [7, -8];
+
+if checkOccupancy(map, startWorld) > 0.65
+    error('El punto inicial está en una celda ocupada.');
+end
+
+if checkOccupancy(map, goalWorld) > 0.65
+    error('El punto meta está en una celda ocupada.');
+end
+
+startGrid = world2grid(map, startWorld);
+goalGrid = world2grid(map, goalWorld);
+
+planner = plannerAStarGrid(map);
+pathGrid = plan(planner, startGrid, goalGrid);
+pathWorld = grid2world(map, pathGrid);
+
+figure('Name','Trayectoria A*','NumberTitle','off');
+show(map);
+hold on;
+plot(pathWorld(:,1), pathWorld(:,2), 'r', 'LineWidth', 2);
+plot(startWorld(1), startWorld(2), 'go', 'MarkerSize', 10, 'LineWidth', 2);
+plot(goalWorld(1), goalWorld(2), 'bx', 'MarkerSize', 10, 'LineWidth', 2);
+legend('Ruta A*', 'Inicio', 'Meta');
+title('Trayectoria generada con A*');
+axis equal;
+hold off;
+
+mapDynamic = copy(map);
+mapDynamic.OccupiedThreshold = 0.65;
+mapDynamic.FreeThreshold = 0.2;
+
+obsIdx = round(size(pathWorld,1)/2);
+obstacleCenter = pathWorld(obsIdx,:);
+obstacleRadius = 0.45;
+
+occ = occupancyMatrix(mapDynamic);
+[rows, cols] = size(occ);
+[rowGrid, colGrid] = ndgrid(1:rows, 1:cols);
+worldPts = grid2world(mapDynamic, [rowGrid(:), colGrid(:)]);
+
+distToObs = vecnorm(worldPts - obstacleCenter, 2, 2);
+insideObs = reshape(distToObs <= obstacleRadius, rows, cols);
+occ(insideObs) = 0.85;
+
+mapDynamic = occupancyMap(occ, mapResolution);
+mapDynamic.GridLocationInWorld = map.GridLocationInWorld;
+mapDynamic.OccupiedThreshold = 0.65;
+mapDynamic.FreeThreshold = 0.2;
+
+gridObs = world2grid(mapDynamic, obstacleCenter);
+fprintf('Obstáculo artificial en mundo: [%.2f, %.2f]\n', obstacleCenter(1), obstacleCenter(2));
+fprintf('Obstáculo artificial en grilla: fila %d, columna %d\n', gridObs(1), gridObs(2));
+occDyn = occupancyMatrix(mapDynamic);
+fprintf('Ocupación en el centro del obstáculo: %.3f\n', occDyn(gridObs(1), gridObs(2)));
+
+pp = controllerPurePursuit;
+pp.Waypoints = pathWorld;
+pp.DesiredLinearVelocity = 0.15;
+pp.MaxAngularVelocity = 1.0;
+pp.LookaheadDistance = 0.5;
+
+obstacleThreshold = 0.8;
+vAvoid = 0.12;
+kAvoid = 1.5;
+
+dt = 0.1;
+goalTol = 0.20;
+maxSteps = 3000;
+
+robotPose = [startWorld(1), startWorld(2), pi/2];
+robotPath = robotPose(1:2);
+
+lidarAngles = linspace(-pi/2,pi/2,181)';
+
+figure('Name','Seguimiento de ruta con Pure Pursuit + VFH','NumberTitle','off');
+show(mapDynamic);
+hold on;
+plot(pathWorld(:,1), pathWorld(:,2), 'r--', 'LineWidth', 1.5);
+plot(startWorld(1), startWorld(2), 'go', 'MarkerSize', 10, 'LineWidth', 2);
+plot(goalWorld(1), goalWorld(2), 'bx', 'MarkerSize', 10, 'LineWidth', 2);
+plot(obstacleCenter(1), obstacleCenter(2), 'mo', 'MarkerSize', 10, 'LineWidth', 2);
+hRobot = plot(robotPose(1), robotPose(2), 'ko', 'MarkerSize', 8, 'LineWidth', 2);
+hPath = plot(robotPath(:,1), robotPath(:,2), 'b', 'LineWidth', 2);
+legend('Ruta A*', 'Inicio', 'Meta', 'Obstáculo', 'Robot', 'Trayectoria seguida');
+title('Robot siguiendo ruta A* con Pure Pursuit + VFH');
+axis equal;
+
+avoidState = 0;
+
+avoidStartPose = robotPose(1:2);
+
+avoidStartTheta = robotPose(3);
+
+routeReplanned = false;
+
+for step = 1:maxSteps
+    theta = robotPose(3);
+
+    x_laser = robotPose(1) + cos(theta)*lx - sin(theta)*ly;
+    y_laser = robotPose(2) + sin(theta)*lx + cos(theta)*ly;
+
+    laserPoseSim = robotPose;%[x_laser, y_laser, theta];
+
+    lidarRangesRaw = rayIntersection(mapDynamic, laserPoseSim, lidarAngles, maxRange);
+
+    if size(lidarRangesRaw,2) > 1
+        lidarRanges = min(lidarRangesRaw, [], 2, 'omitnan');
+    else
+        lidarRanges = lidarRangesRaw;
+    end
+
+    lidarRanges = double(lidarRanges(:));
+    lidarAngles = double(lidarAngles(:));
+
+    lidarRanges(isnan(lidarRanges)) = maxRange;
+    lidarRanges(isinf(lidarRanges)) = maxRange;
+    lidarRanges(lidarRanges < 0) = maxRange;
+    lidarRanges(lidarRanges > maxRange) = maxRange;
+
+    lidarRanges = lidarRanges(:);
+    lidarAnglesUse = lidarAngles(:);
+
+    frontSector = abs(lidarAnglesUse) <= deg2rad(45);
+    minFrontRange = min(lidarRanges(frontSector));
+    obstacleDetected = minFrontRange < obstacleThreshold;
+
+    if minFrontRange > 2*obstacleThreshold
+        routeReplanned = false;
+    end
+
+    if obstacleDetected && ~routeReplanned
+
+        disp('Obstáculo detectado. Recalculando ruta...');
+    
+        currentGrid = world2grid(mapDynamic, robotPose(1:2));
+    
+        planner = plannerAStarGrid(mapDynamic);
+    
+        newPathGrid = plan(planner, currentGrid, goalGrid);
+    
+        if isempty(newPathGrid)
+    
+            disp('No existe ruta alternativa.');
+    
+            break;
+    
+        end
+    
+        pathWorld = grid2world(mapDynamic, newPathGrid);
+    
+        pp.Waypoints = pathWorld;
+    
+        routeReplanned = true;
+    
+        disp('Nueva ruta calculada.');
+    
+    end
+    
+    [v, omega] = pp(robotPose);
+
+    robotPose(1) = robotPose(1) + v*cos(robotPose(3))*dt;
+    robotPose(2) = robotPose(2) + v*sin(robotPose(3))*dt;
+    robotPose(3) = wrapToPi(robotPose(3) + omega*dt);
+
+    robotPath(end+1,:) = robotPose(1:2);
+
+    set(hRobot, 'XData', robotPose(1), 'YData', robotPose(2));
+    set(hPath, 'XData', robotPath(:,1), 'YData', robotPath(:,2));
+
+    delete(findobj(gca, 'Tag', 'lidarDebug'));
+
+    %plot(laserPoseSim(1), laserPoseSim(2), 'mo', 'MarkerSize', 6, 'LineWidth', 1.5, 'Tag', 'lidarDebug', 'HandleVisibility', 'off');
+
+    % Dirección del robot
+L = 1.0;
+xRobotFront = robotPose(1) + L*cos(robotPose(3));
+yRobotFront = robotPose(2) + L*sin(robotPose(3));
+
+%plot([robotPose(1), xRobotFront], [robotPose(2), yRobotFront], 'g-', 'LineWidth', 2, 'Tag', 'lidarDebug', 'HandleVisibility', 'off');
+
+% Dirección frontal del lidar
+xLidarFront = laserPoseSim(1) + L*cos(laserPoseSim(3));
+yLidarFront = laserPoseSim(2) + L*sin(laserPoseSim(3));
+%{
+plot([laserPoseSim(1), xLidarFront], ...
+     [laserPoseSim(2), yLidarFront], ...
+     'm-', 'LineWidth', 2, ...
+     'Tag', 'lidarDebug', 'HandleVisibility', 'off');
+%}
+    L = 1.0;
+    xFront = laserPoseSim(1) + L*cos(laserPoseSim(3));
+    yFront = laserPoseSim(2) + L*sin(laserPoseSim(3));
+
+
+    idxRays = 1:40:numel(lidarAnglesUse);
+    for ii = idxRays
+        r = lidarRanges(ii);
+        xEnd = laserPoseSim(1) + r*cos(laserPoseSim(3) + lidarAnglesUse(ii));
+        yEnd = laserPoseSim(2) + r*sin(laserPoseSim(3) + lidarAnglesUse(ii));
+    end
+
+    drawnow;
+
+    if norm(robotPose(1:2) - goalWorld) < goalTol
+        disp('Meta alcanzada.');
+        break;
+    end
 end
