@@ -1,4 +1,4 @@
-# PROYECTO INTEGRADOR PARTE 1 
+# PROYECTO INTEGRADOR
 
 ##  Pipeline | Localización y Análisis de datos del Robot MiR100 
 
